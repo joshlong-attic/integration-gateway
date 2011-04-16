@@ -1,0 +1,58 @@
+Integration Gateway: 
+
+B2B / B2C Partner/Customer Gateway:
+This is a scratchpad repository for me to - one day - build an alternative, more powerful alternative to things like http://www.axway.com/products-solutions/mft/gateways, http://www.tibco.com/products/soa/external-connectivity/b2b-gateway/businessconnect/default.jsp, and http://www.softwareag.com/corporate/products/wm/b2b/trading_networks/overview/default.asp. Basically, all of these products provide a way to drive the creation of endpoints of multiple types: SSH endpoints, HTTPS endpoints, AS2 endpoints, FTPS endpoints, etc. These aren't clients - as most integration solutions provide - they're servers. The creation of these endpoints is (when done correctly) provided through a unified interface: it should be possible to establish credentials for a sngle user and then expose an FTPS, AS2, etc endpoints for him that others can log in to. Though the exposed endpoints belong to the user, those endpoints can be shared with any number of other users, who also have credentials and should be able to be access any of the supported types in a consistant way. Consistent means that - where possible, for example, shared concepts are shared: the same SSL key, the same user and password, etc., could enable access to all assigned endpoints. Naturally, these values are overridable, but it should be possible to just share the security information. 
+
+There are several obvious approaches:
+ - Apache Mina FTP Server can be made to expose ftp mounts based on database information. So, add a new row, and voila, a new user is provisioned with an FTP endpoint. 
+ - Apache Tomcat/Jetty both embed really nicely and can provide 'virtual hosts' (don't know what SPI it supports...)
+ - jSSH (for SFTP) can be used to expose SSH services for users (don't know what SPI it supports..)
+ - Apache James email server can add accounts based on a database or pluggable SPI, too
+ - OpenFire XMPP can add accounts based on a database or pluggable SPI, too
+
+Nautrally, there are others, and these solutions would still need to be integrated, but there's a lot of power. Naturally, the beauty in such a unified system would be that we could make it easy to respond to the incoming traffic in a consistant way using Spring Integration. It would be a snap to deploy hook and hook up processing logic based on configuration and channels. 
+
+Remember, this isnt a server - it's meant to all be managed through Spring - it'smore like the reverse of SPring Integration, which is a client that sends and receives messages from other systems. This would be the server-side, even if its not a server in of itself - to handle things from the endpoint side. Spring Integration already does this in a few places - e.g., to support expose REST/HTTP/WS endpoints, users register Spring Integration aware HttpRequestHandlers or Spring MVC controllers that in turn simply delegate to Spring Integration machinery.  In Spring Integration, these are "inbound adapters," as the messages are coming into Spring Integration which is sitting *behind* some other service. Inbound always refers to "relative to Spring Integration," but this is still different than othe inbound adapters where the message is coming *from* another system (an email server), but coming *into* Sprign Itegration to be processed.
+
+Additionally, Spring Integration only supports the inbound adapters that are registered with the configuration -- there's no support for dynamically supporting new acocunts nad so on based on some backing configuratoin like a datasource or an LDAP tree. 
+
+This ability to dynamically provision adapters based on variable data is huge, and there's another aspect to it. Supopse I wanted to handle multiple twitter accounts, e.g., -i want to register listeners for the tweet streams for multiple users, based on somethign that can be driven by a database or something -- i'd have to shutdown Spring Integration and restart it and add the new adapter, which is of course not scalable. To support "multi-tenant" client adapters, we need to take a different approach. I had been wondering about this whole thing for a while - to make the Twitter adapter - for example -- support multiple twitter accounts, or to make the directory adapter support new directories addeded to a well known root folder - would often entail reworking the adapter code and indeed the client library itself that's used int he adapter. There's a different way. My friend Oliver and I were talking and we came upon just that use case: how do we make the inbound twitter adapter dynamically handle different users? The approach we arrived at is the most elegant I've seen for the minimum of pain: simply manage multiple ApplicationContexts, which gives the benefit of being templatizable! Let's suppose we had this for the configuraton for *a* single inbound file adapter pipeline solution:
+
+
+<beans ...>
+
+ <file:inbound-channel-adapter channel ="fileChannel" path = "#{config.path}" >
+       <poller interval = "1000" />
+  </file:inbound-channel-adapter/>
+
+</beans>
+
+NB: we haven't defined the fileChannel itself or the 'config' bean that's dereferenced in the SpEL expression.
+
+Now, we can "parameterize" this and simply share a reference to a channel. Messages from all different inbound directory adapters will come in through a known inbound channel that will be "implanted" in the context from a parent AC, like so:
+
+ ... 
+ public void bootstrapChildInboundDirectoryMonitor( final ApplicationContext applicationContext /* parent */,
+                                                    final MessageChannel mcFromParent, 
+                                                    final UserConfiguration  config ) {
+        ClassPathXmlApplicationContext ctx = new ClassPathXmlApplicationContext(applicationContext) {
+                    @Override
+                    protected void customizeBeanFactory( DefaultListableBeanFactory beanFactory) {
+                        beanFactory.registerSingleton( "fileChannel", mc) ;
+                        beanFactory.registerSingleton("config", config);
+                    }
+                };
+        ctx.setConfigLocation("classpath:inbound-file-context.xml");
+        ctx.refresh();
+ }
+ ...
+ UserConfiguration config = ... ; 
+ MessageChannel channel = parentAc.getBean( "c", MessageChannel.class) ; // aleady wired to the 
+ bootstrapChildInboundDirectoryMonitor( parentAc , channel, config ) ; 
+ ...
+
+
+So this is too can implies that we could dynamically scale out the supported users in a programmatic way using a strategy SPI just as we did the new FTP mounts and so on. One implementation of the configuration strategy might call for a database-based configuration, another for file-based configuration, etc.
+
+
+
